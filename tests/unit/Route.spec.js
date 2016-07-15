@@ -2,10 +2,12 @@
 
 'use strict';
 var Route = require('../../build/Route')
-  , Promise = require('@naujs/util').getPromise();
+  , util = require('@naujs/util')
+  , Promise = util.getPromise();
 
 describe('Route', () => {
   var route, ctx;
+  var args, handler;
 
   describe('#filterAndValidate', () => {
     beforeEach(() => {
@@ -69,8 +71,6 @@ describe('Route', () => {
   });
 
   describe('#execute', () => {
-    var args, handler;
-
     beforeEach(() => {
       args = {
         name: 1
@@ -84,7 +84,8 @@ describe('Route', () => {
       route = new Route('test', {
         args: {
           name: 'number'
-        }
+        },
+        public: true
       }, handler);
     });
 
@@ -159,5 +160,122 @@ describe('Route', () => {
         ]);
       });
     });
+  });
+
+  describe('Access Control', () => {
+    var deferred, authenticate;
+    beforeEach(() => {
+      deferred = util.defer();
+
+      args = {
+        name: 'test'
+      };
+
+      ctx = {
+        test: 2
+      };
+
+      handler = jasmine.createSpy('handler');
+      authenticate = jasmine.createSpy('authenticate');
+
+      Route.role('authenticated', (args, ctx) => {
+        return !!ctx.user;
+      });
+
+      Route.role('smod', (args, ctx) => {
+        return ctx.role === 'smod';
+      });
+
+      Route.role('admin', (args, ctx) => {
+        return ctx.role === 'admin';
+      });
+
+      Route.role('mod', (args, ctx) => {
+        return ctx.role === 'mod';
+      });
+
+      Route.authenticate((args, ctx) => {
+        authenticate(args, ctx);
+        return deferred.promise;
+      });
+    });
+
+    it('should not run the authenticate function when in public mode', () => {
+      deferred.resolve({
+        id: 1
+      });
+
+      route = new Route('test', {
+        args: {
+          name: 'string'
+        },
+        public: true,
+        access: ['authenticated']
+      }, handler);
+
+      return route.execute(args, ctx).then(() => {
+        expect(ctx.user === null).toBe(true);
+        expect(authenticate).not.toHaveBeenCalled();
+      });
+    });
+
+    it('should run the authenticate function', () => {
+      deferred.resolve({
+        id: 1
+      });
+
+      route = new Route('test', {
+        args: {
+          name: 'string'
+        },
+        access: ['authenticated']
+      }, handler);
+
+      return route.execute(args, ctx).then(() => {
+        expect(authenticate.calls.count()).toEqual(1);
+        expect(ctx.user).toEqual({
+          id: 1
+        });
+      });
+    });
+
+    it('should reject if all roles are not met', () => {
+      deferred.resolve({
+        id: 1
+      });
+
+      route = new Route('test', {
+        args: {
+          name: 'string'
+        },
+        access: ['admin']
+      }, handler);
+
+      ctx.role = 'mod';
+
+      return route.execute(args, ctx).then(fail, (error) => {
+        expect(error.statusCode).toEqual(403);
+      });
+    });
+
+    it('should allow if only one of the roles is met', () => {
+      deferred.resolve({
+        id: 1
+      });
+
+      route = new Route('test', {
+        args: {
+          name: 'string'
+        },
+        access: ['smod', 'mod']
+      }, handler);
+
+      ctx.role = 'mod';
+
+      return route.execute(args, ctx).then(() => {
+
+      }, fail);
+    });
+
   });
 });

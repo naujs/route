@@ -1,10 +1,12 @@
 var util = require('@naujs/util')
+  , Component = require('@naujs/component')
   , _ = require('lodash')
   , Promise = util.getPromise()
   , Property = require('@naujs/property');
 
-class Route {
+class Route extends Component {
   constructor(name, definition, handler) {
+    super();
     this._name = name;
     this._definition = definition;
     this.setHandler(handler);
@@ -12,6 +14,52 @@ class Route {
     this._beforeHooks = [];
     this._afterHooks = [];
     this.enable();
+  }
+
+  static authenticate(fn) {
+    this._autenticate = fn;
+  }
+
+  authenticateRequest(args, ctx) {
+    var auth = this.getClass()._autenticate;
+    if (!auth) return Promise.resolve(null);
+    return util.tryPromise(auth(args, ctx));
+  }
+
+  static role(name, fn) {
+    this._roles = this._roles || {};
+    this._roles[name] = fn;
+  }
+
+  _executeRole(access, args, ctx) {
+    access = access.slice();
+    var role = access.shift();
+
+    if (!role) return Promise.resolve(false);
+
+    var roles = this.getClass()._roles || {};
+    var fn = roles[role];
+    if (!fn) return Promise.resolve(false);
+
+    return util.tryPromise(fn(args, ctx)).then((result) => {
+      if (result) return true;
+      return this._executeRole(access, args, ctx);
+    });
+  }
+
+  authorizeRequest(args, ctx) {
+    var access = this.getDefinition('access');
+    var error = new Error();
+    error.code = error.statusCode = 403;
+    error.message = 'Unauthorized access';
+
+    if (this.getDefinition('public') === true) return Promise.resolve([]);
+    if (!access || !access.length) return Promise.reject(error);
+
+    return this._executeRole(access, args, ctx).then((result) => {
+      if (!result) return Promise.reject(error);
+      return true;
+    });
   }
 
   getPath() {
@@ -67,8 +115,9 @@ class Route {
     delete this._args;
   }
 
-  getDefinition() {
-    return this._definition;
+  getDefinition(key) {
+    if (!key) return this._definition;
+    return (this._definition || {})[key];
   }
 
   setModelClass(cls) {
@@ -129,17 +178,38 @@ class Route {
 
   execute(args, ctx) {
     if (!this._enabled) {
-      return Promise.reject(new Error(`API ${this.getName()} is disabled`));
+      return Promise.reject(new Error(`${this.getName()} is disabled`));
     }
 
     ctx = ctx || {};
+    var Model = this.getModelClass();
+    var handler = this.getHandler();
 
-    if (!this._handler || !_.isFunction(this._handler)) {
-      return Promise.reject(new Error(`API ${this.getName()} does not have a valid handler`));
+    if (!handler && Model) {
+      handler = Model[this.getName()];
     }
 
-    return this._runHooks(this._beforeHooks, args, ctx).then(() => {
-      return this._handler(args, ctx);
+    if (!handler || !_.isFunction(handler)) {
+      return Promise.reject(new Error(`${this.getName()} does not have a valid handler`));
+    }
+
+    var authPromise;
+    if (this.getDefinition('public') === true) {
+      authPromise = Promise.resolve(null);
+    } else {
+      authPromise = this.authenticateRequest(args, ctx);
+    }
+
+    return authPromise.then((user) => {
+      ctx.user = user;
+      return this.authorizeRequest(args, ctx);
+    }).then(() => {
+      return this._runHooks(this._beforeHooks, args, ctx);
+    }).then(() => {
+      return this.filterAndValidate(args, ctx);
+    }).then((filteredInputs) => {
+      if (Model) return handler.call(Model, filteredInputs, ctx);
+      return handler(filteredInputs, ctx);
     }).then((result) => {
       ctx.result = result;
       return this._runHooks(this._afterHooks, args, ctx).then(() => {
